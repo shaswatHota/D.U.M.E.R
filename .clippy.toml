@@ -1,0 +1,4 @@
+# Clippy configuration for D.U.M.E.R
+cognitive-complexity-threshold = 25
+too-many-arguments-threshold = 7
+too-many-lines-threshold = 100

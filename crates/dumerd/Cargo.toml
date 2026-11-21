@@ -1,0 +1,27 @@
+[package]
+name = "dumerd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dumer-proto.workspace = true
+dumer-match.workspace = true
+dumer-policy.workspace = true
+dumer-audit.workspace = true
+dumer-platform.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ciborium.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

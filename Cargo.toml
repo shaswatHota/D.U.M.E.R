@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dumer-proto",
+    "crates/dumer-match",
+    "crates/dumer-crypto",
+    "crates/dumer-policy",
+    "crates/dumer-audit",
+    "crates/dumer-vault",
+    "crates/dumer-platform",
+    "crates/dumer-net",
+    "crates/dumer-planner",
+    "crates/dumerd",
+    "crates/dumer-infer",
+    "crates/dumer-voice",
+    "crates/dumer-research",
+    "crates/dumer-privd",
+    "crates/dumer-cli",
+    "crates/dumer-ffi",
+]
+exclude = [
+    "fuzz",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["D.U.M.E.R Developers"]
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+
+[workspace.dependencies]
+dumer-proto = { path = "crates/dumer-proto", version = "0.1.0" }
+dumer-match = { path = "crates/dumer-match", version = "0.1.0" }
+dumer-policy = { path = "crates/dumer-policy", version = "0.1.0" }
+dumer-audit = { path = "crates/dumer-audit", version = "0.1.0" }
+dumer-platform = { path = "crates/dumer-platform", version = "0.1.0" }
+aho-corasick = "1.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ciborium = "0.2.2"
+thiserror = "2.0"
+sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+proptest = "1.6"
+tempfile = "3.17"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
