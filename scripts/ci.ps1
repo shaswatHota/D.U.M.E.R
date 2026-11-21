@@ -14,6 +14,7 @@ if (Test-Path $cargoBin) {
 $mingw64 = "C:\Users\ASUS\Downloads\gcc-16.1.0-gdb-17.2.90.20260510-binutils-2.46.0-mingw-w64-v14.0.0-ucrt\bin"
 if (Test-Path $mingw64) {
     $env:PATH = "$mingw64;$($env:PATH -replace 'C:\\MinGW\\bin;?','')"
+    $env:CC = "$mingw64\gcc.exe"
 }
 
 Write-Host "==================================================" -ForegroundColor Cyan

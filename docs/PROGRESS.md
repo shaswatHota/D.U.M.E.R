@@ -4,8 +4,8 @@
 > Update it at the end of every session. It is the only memory between sessions.
 
 **Last updated:** 2026-11-21
-**Current milestone:** M3 — Policy broker (DONE)
-**Next step:** Owner reviews M3 changes and tags `m3-done`; proceed to M4 (Platform adapter) in new session.
+**Current milestone:** M5 — Storage, vault, memory (DONE)
+**Next step:** Owner reviews M5 changes and tags `m5-done`; proceed to M6 (Local interfaces + push-to-talk voice) in new session.
 
 ## Milestone status
 
@@ -14,9 +14,9 @@
 | M0 Repo, threat model, invariants, CI | DONE (owner-confirmed) | m0-done | verified clean |
 | M1 Core skeleton, protocol types, audit | DONE (owner-confirmed) | m1-done | verified clean |
 | M2 Command registry, matcher, fast path | DONE (owner-confirmed) | m2-done | verified clean |
-| M3 Policy broker | DONE (exit criteria met) | m3-done | pending owner review & tag |
-| M4 Platform adapter (Windows, Rust) | NOT STARTED | | |
-| M5 Storage, vault, memory | NOT STARTED | | |
+| M3 Policy broker | DONE (owner-confirmed) | m3-done | verified clean |
+| M4 Platform adapter (Windows, Rust) | DONE (owner-confirmed) | m4-done | verified clean |
+| M5 Storage, vault, memory | DONE (exit criteria met) | m5-done | pending owner review & tag |
 | M6 Local interfaces + push-to-talk voice | NOT STARTED | | |
 | M7 Private remote link | NOT STARTED | | |
 | M8 Android companion | NOT STARTED | | |
@@ -64,6 +64,8 @@ Status values: NOT STARTED / IN PROGRESS / BLOCKED / DONE (exit criteria met + o
 | 2026-11-21 | ADR-017: Append-only hash chaining and secret redaction in `dumer-audit` | SHA-256 event chaining, sequence validation, tamper detection, and proactive secret/PII redaction before hashing. |
 | 2026-11-21 | ADR-018: Command registry, normalizer, and fast-path matcher in `dumer-proto` and `dumer-match` | Typed `Operation` enum (no shell hatches), initial 5 commands, Aho-Corasick multi-pattern scanner, bounded fuzzy Levenshtein, ambiguity margin (0.15) failing closed, act-first report-after terse result, <50 µs dispatch. |
 | 2026-11-21 | ADR-019: Deterministic Policy Broker with Taint Tracking, Narrow Capabilities, and Action-Bound Approvals in `dumer-policy` | Pure, deterministic, I/O-free evaluation function `(PolicyInput) -> Allow | Deny(reason) | RequireApproval(spec)` enforcing default-deny (Invariant 2), zero model confidence input (Invariant 1), prohibition of wildcard shell/filesystem/admin capabilities (Invariant 4), taint propagation requiring user approval for Web/File/Voice/Model inputs in Tier >= 1 ops (Invariant 9), cryptographic approval binding over canonical request hash + nonce + device + expiry with replay detection (Invariant 5), dual approvals for Tier 4, and deterministic kill switches (global pause, device revocation) without involving the model (Invariant 12). |
+| 2026-11-21 | ADR-020: OS-Neutral Platform Trait, Authenticode Signature Verification, Direct Win32 Process Spawning, and Anti-Squatting Named Pipe IPC in `dumer-platform` | OS-neutral `Platform` trait (`launch_registered_app`, `basic_status`, `notify`, `lock_state`). Windows adapter (`WindowsPlatform`) with strict Authenticode and Windows Security Catalog verification (`WinVerifyTrust`, `CryptQueryObject`, `CertGetNameStringW`, `CryptCATAdmin*`) ensuring only allowlisted, signature-verified applications from expected publishers can launch. Spawns processes directly via Win32 `CreateProcessW` without any command shell, prohibiting handle inheritance (`bInheritHandles = FALSE`) and handle leaks. Local named pipe IPC (`PlatformIpcServer`, `PlatformIpcClient`) enforcing anti-squatting via `FILE_FLAG_FIRST_PIPE_INSTANCE`, same-user client authentication via token SID comparison (`ImpersonateNamedPipeClient` + `EqualSid` + `RevertToSelf`), length-prefixed deterministic CBOR framing (`v: 1`, `deny_unknown_fields`, 64 KiB cap), workstation session lock enforcement (`OpenInputDesktop`), and timeout-guarded socket operations. |
+| 2026-11-21 | ADR-021: Encrypted Storage Hierarchy, DPAPI Key Envelopes, Argon2id Passphrase KDF, Separate Vault Key, and Cascading Deletion in `dumer-crypto` and `dumer-vault` | `Key256` zeroized on drop, `KeyEnvelope` wrapping random 256-bit DEK using Windows DPAPI CNG `CryptProtectData`/`CryptUnprotectData` and Argon2id KDF passphrase KEK, XChaCha20-Poly1305 AEAD with 192-bit nonces, and `CanaryManager`. Bundles SQLite 3.54.1 (WAL mode, foreign keys, synchronous NORMAL, patched against RUSTSEC-2026-0459/CVE-2026-119375) with schema migrations (`devices`, `tasks`, `memory_records`, `audit_events`, `grants`, `approvals`, `cache_entries`, `vault_items`). Encrypts all sensitive memory and cache records at rest using DEK. Enforces separate `VaultKey` with user-verification unlock, auto-lock timer, and fail-closed locked access. Enforces placeholder substitution (`{{PROFILE.*}}`, `{{VAULT.*}}`) strictly validating per-field destination allowlists. Enforces freshness classes (`Static`, `Slow`, `Fast`, `Volatile`) with automatic TTL expiration purge, cascading deletion across memory and cache, and sanitized export omitting locked secrets. |
 
 ## Deferred risks and known gaps
 | Milestone | Item | Severity | Planned fix |
@@ -92,6 +94,66 @@ Status values: NOT STARTED / IN PROGRESS / BLOCKED / DONE (exit criteria met + o
 - Relay / VPS choice: (decide before M7)
 
 ## Session log (newest first)
+
+### 2026-11-21 — M5: Storage, Vault, Memory
+- Done:
+  - Cryptographic primitives crate `crates/dumer-crypto`:
+    - `Key256` key wrapper implementing `Zeroize` and `ZeroizeOnDrop` with redacted debug representations.
+    - `KeyEnvelope`: OS CSPRNG 256-bit DEK generation, Windows DPAPI wrapping/unwrapping (`CryptProtectData`/`CryptUnprotectData` via CNG with documented `// SAFETY:` justifications), Argon2id passphrase KDF derivation (64 MiB, 3 iterations, 4 lanes), and KEK rotation.
+    - `XChaCha20Poly1305` AEAD encryption/decryption with unique 192-bit (24-byte) nonces, authenticated associated data (AAD) binding, and fail-closed tampering rejection.
+    - `CanaryManager` and `CanaryToken` for generating high-entropy canary secrets and scanning text/logs to detect data exfiltration.
+  - Storage & vault crate `crates/dumer-vault`:
+    - Database migrations system (`_schema_migrations`) with bundled SQLite 3.54.1 (WAL mode, foreign keys, synchronous NORMAL) patched against CVE-2026-119375 / RUSTSEC-2026-0459.
+    - Full relational tables: `devices`, `tasks`, `memory_records`, `audit_events`, `grants`, `approvals`, `cache_entries`, `vault_items`.
+    - Memory records encrypted at rest using DEK via XChaCha20-Poly1305, tracking source, confidence, sensitivity, retention, provenance, taint, and expiration.
+    - `VaultManager`: separate `VaultKey` distinct from DEK (ADR-007), user-verification unlock, auto-lock timer, manual lock with memory zeroization, and fail-closed rejection when locked (`VaultLocked`).
+    - `PlaceholderResolver`: parses `{{PROFILE.*}}` and `{{VAULT.*}}`, enforcing per-field destination allowlists (fails closed if destination is unauthorized or vault is locked).
+    - `TtlEngine` and `FreshnessClassifier`: implements freshness classes (`Static`, `Slow`, `Fast`, `Volatile`), zero persistence for volatile content, and automated purging of expired cache and memory records.
+    - `export_data`: sanitizes exported bundles, redacting vault secrets when locked or unauthorized.
+    - `cascade_delete_memory_record`: deletes memory records and cascades deletion to linked cache entries.
+  - Daemon integration in `dumerd`:
+    - Integrated storage and vault lock/unlock/encryption checks into `dumerd::run_self_tests`, verifying Invariant 8 at startup.
+- Tests and checks run (with results):
+  - `cargo fmt --check`: PASS
+  - `cargo clippy --workspace --all-targets -- -D warnings`: PASS (0 warnings)
+  - `cargo test --workspace`: PASS (102 tests passed across all crates, 0 failed)
+    - 9 tests in `dumer-crypto`: key generation, redacted debug, AEAD encrypt/decrypt roundtrip, tampered ciphertext rejection, wrong key rejection, tampered AAD rejection, Argon2id KDF derivation, KEK envelope wrap/unwrap/rotation, DPAPI envelope wrap/unwrap, canary token generation and leak detection.
+    - 8 tests in `dumer-vault`: schema migration & table creation, restart survival and wrong-key failure, vault lock/unlock and auto-lock timer, placeholder allowlist enforcement, TTL freshness classes & expiration purge, cascading deletion, export secret redaction, tracing log-scan verifying zero secrets/canaries in logs.
+    - 85 existing tests in `dumer-audit`, `dumer-match`, `dumer-platform`, `dumer-policy`, and `dumerd` all pass.
+  - `cargo deny check`: PASS (advisories ok, bans ok, licenses ok, sources ok; Zlib added for foldhash, SQLite 3.54.1 patched)
+  - `cargo audit`: PASS (153 dependencies scanned, 0 vulnerabilities)
+- Could not verify: None (all 102 unit, integration, crypto, and security tests pass).
+- Decisions:
+  - ADR-021: Encrypted Storage Hierarchy, DPAPI Key Envelopes, Argon2id Passphrase KDF, Separate Vault Key, and Cascading Deletion in `dumer-crypto` and `dumer-vault`.
+- Deferred risks: None for M5.
+- Next step: Owner reviews diff, commits, and tags `m5-done`; proceed to M6 (Local interfaces + push-to-talk voice) in new session.
+
+### 2026-11-21 — M4: Platform Adapter (Windows, Rust)
+- Done:
+  - OS-neutral `Platform` trait (`launch_registered_app`, `basic_status`, `notify`, `lock_state`) defined in `crates/dumer-platform`.
+  - Windows platform adapter (`WindowsPlatform`) implemented in `crates/dumer-platform/src/windows` running in logged-in user context (`is_unprivileged()` verified).
+  - App registry (`AppRegistry`) with `AppDefinition` (canonical paths, allowlisted argument templates, publisher signature and hash expectations).
+  - Strict Authenticode and Windows Security Catalog verification (`WinVerifyTrust`, `CryptQueryObject`, `CertGetNameStringW`, `CryptCATAdmin*`) verifying publisher identity and rejecting unsigned, tampered, or swapped binaries at launch time.
+  - Process launching implemented strictly via Win32 `CreateProcessW` directly (no shell, no cmd/powershell, no handle inheritance `bInheritHandles = FALSE`, zero handle leaks).
+  - Workstation session lock state detection (`OpenInputDesktop`) preventing application launches when the workstation session is locked.
+  - Local Named Pipe IPC (`PlatformIpcServer`, `PlatformIpcClient`) enforcing anti-squatting defense via `FILE_FLAG_FIRST_PIPE_INSTANCE`, same-user client authentication via token SID comparison (`ImpersonateNamedPipeClient` + `EqualSid` + `RevertToSelf`), and timeout guards.
+  - Length-prefixed deterministic CBOR framing for all IPC messages (`PlatformIpcRequest`, `PlatformIpcResponse`, `v: 1`, `deny_unknown_fields`, 64 KiB frame cap).
+  - In-memory `MockPlatform` implemented for testing and deterministic environments.
+  - Fast-path integration in `dumerd::fast_path` (`dispatch_fast_path_with_platform`, `execute_operation_with_platform`) wiring the platform adapter to deterministic command execution with audit logging.
+- Tests and checks run (with results):
+  - `cargo fmt --check`: PASS
+  - `cargo clippy --workspace --all-targets -- -D warnings`: PASS (0 warnings)
+  - `cargo test --workspace`: PASS (85 tests passed across all crates, 0 failed)
+    - 16 tests in `dumer-platform`: invalid app ID, unregistered app, missing executable, swapped/unsigned executable, wrong publisher signature, argument template enforcement, locked session rejection, pipe squatting defense (`FILE_FLAG_FIRST_PIPE_INSTANCE`), peer verification, IPC request/response roundtrip, duplicate requests, notify command, server crash/restart, general shell prevention (Invariant 4), unprivileged token check.
+    - 12 tests in `dumerd`: fast path with platform adapter launches app, locked platform rejection, CLI flags, daemon lifecycle, audit logging, and p95 latency benchmark.
+    - All existing unit, integration, policy proptests, and security tests pass.
+  - `cargo deny check`: PASS (advisories ok, bans ok, licenses ok, sources ok)
+  - `cargo audit`: PASS (103 dependencies scanned, 0 vulnerabilities)
+- Could not verify: None (all 16 platform tests and integration tests pass).
+- Decisions:
+  - ADR-020: OS-Neutral Platform Trait, Authenticode Signature Verification, Direct Win32 Process Spawning, and Anti-Squatting Named Pipe IPC in `dumer-platform`.
+- Deferred risks: None for M4.
+- Next step: Owner reviews diff, commits, and tags `m4-done`; M5 (Storage, vault, memory) in new session.
 
 ### 2026-11-21 — M3: Policy Broker
 - Done:

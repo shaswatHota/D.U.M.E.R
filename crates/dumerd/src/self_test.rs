@@ -2,9 +2,12 @@
 #![forbid(unsafe_code)]
 
 use dumer_audit::{AuditChain, AuditEventType};
+use dumer_crypto::Key256;
 use dumer_platform::is_unprivileged;
 use dumer_proto::{canonical_cbor, decode_frame, encode_frame, Hello, ProtoError};
+use dumer_vault::{EncryptedDatabase, MemoryClass, MemoryRecord, VaultManager};
 use std::collections::BTreeMap;
+use std::time::Duration;
 use thiserror::Error;
 
 use crate::config::DaemonConfig;
@@ -23,6 +26,9 @@ pub enum SelfTestError {
 
     #[error("Audit hash chain verification failed: {0}")]
     AuditIntegrityFailed(String),
+
+    #[error("Storage and vault encryption check failed: {0}")]
+    StorageVaultFailed(String),
 }
 
 /// Results summary of self-test execution.
@@ -32,6 +38,7 @@ pub struct SelfTestReport {
     pub config_verified: bool,
     pub proto_codec_verified: bool,
     pub audit_chain_verified: bool,
+    pub storage_vault_verified: bool,
 }
 
 /// Executes all mandatory startup self-tests.
@@ -106,10 +113,65 @@ pub fn run_self_tests(config: &DaemonConfig) -> Result<SelfTestReport, SelfTestE
         .verify()
         .map_err(|e| SelfTestError::AuditIntegrityFailed(e.to_string()))?;
 
+    // 5. Test encrypted database and vault lock/unlock behavior (Invariant 8)
+    let test_dek = Key256::generate();
+    let db = EncryptedDatabase::open_in_memory(test_dek)
+        .map_err(|e| SelfTestError::StorageVaultFailed(format!("open db: {e}")))?;
+
+    let test_record = MemoryRecord {
+        record_id: "selftest_mem".to_string(),
+        memory_class: MemoryClass::Config,
+        source: "selftest".to_string(),
+        confidence: 1.0,
+        sensitivity: "low".to_string(),
+        retention: "ephemeral".to_string(),
+        provenance: "dumerd_selftest".to_string(),
+        taint: "user".to_string(),
+        key: "test_key".to_string(),
+        value: b"ok".to_vec(),
+        created_at: 1,
+        expires_at: None,
+    };
+    db.insert_memory_record(&test_record)
+        .map_err(|e| SelfTestError::StorageVaultFailed(format!("insert memory: {e}")))?;
+
+    let fetched = db
+        .get_memory_record("selftest_mem")
+        .map_err(|e| SelfTestError::StorageVaultFailed(format!("get memory: {e}")))?
+        .ok_or_else(|| {
+            SelfTestError::StorageVaultFailed("Memory record missing after insert".to_string())
+        })?;
+    if fetched.value != b"ok" {
+        return Err(SelfTestError::StorageVaultFailed(
+            "Decrypted memory payload mismatch".to_string(),
+        ));
+    }
+
+    let vault = VaultManager::new();
+    if vault.is_unlocked() {
+        return Err(SelfTestError::StorageVaultFailed(
+            "Vault must be locked on creation".to_string(),
+        ));
+    }
+    let test_vault_key = Key256::generate();
+    vault.unlock(test_vault_key, Duration::from_secs(60));
+    if !vault.is_unlocked() {
+        return Err(SelfTestError::StorageVaultFailed(
+            "Vault unlock failed".to_string(),
+        ));
+    }
+    vault.lock();
+    if vault.is_unlocked() {
+        return Err(SelfTestError::StorageVaultFailed(
+            "Vault lock failed".to_string(),
+        ));
+    }
+
     Ok(SelfTestReport {
         unprivileged_verified: true,
         config_verified: true,
         proto_codec_verified: true,
         audit_chain_verified: true,
+        storage_vault_verified: true,
     })
 }

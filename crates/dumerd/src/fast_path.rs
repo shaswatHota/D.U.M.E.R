@@ -11,6 +11,7 @@
 use ciborium::value::Value;
 use dumer_audit::{AuditChain, AuditEventType};
 use dumer_match::{CommandMatcher, MatchResult};
+use dumer_platform::{Platform, SystemBasicStatus};
 use dumer_policy::{
     AutonomyLevel, CapabilityGrant, PolicyBroker, PolicyDecision, PolicyInput, Principal, TaintMap,
 };
@@ -41,6 +42,17 @@ pub fn dispatch_fast_path(
     input: &str,
     timestamp: u64,
 ) -> Result<FastPathExecution, ProtoError> {
+    dispatch_fast_path_with_platform(matcher, audit_chain, input, timestamp, None)
+}
+
+/// Dispatches a command phrase through the fast path with an optional platform adapter.
+pub fn dispatch_fast_path_with_platform(
+    matcher: &CommandMatcher,
+    audit_chain: &mut AuditChain,
+    input: &str,
+    timestamp: u64,
+    platform: Option<&dyn Platform>,
+) -> Result<FastPathExecution, ProtoError> {
     match matcher.match_phrase(input) {
         MatchResult::Match(cmd) => {
             let mut request_id = [0u8; 16];
@@ -50,7 +62,14 @@ pub fn dispatch_fast_path(
             let hash = hasher.finalize();
             request_id.copy_from_slice(&hash[..16]);
 
-            execute_operation_direct(audit_chain, &cmd.op, &cmd.args, request_id, timestamp)
+            execute_operation_with_platform(
+                audit_chain,
+                &cmd.op,
+                &cmd.args,
+                request_id,
+                timestamp,
+                platform,
+            )
         }
         MatchResult::Ambiguous { .. } => {
             // Ambiguity fails closed; never guess for commands.
@@ -67,6 +86,18 @@ pub fn execute_operation_direct(
     args: &BTreeMap<String, Value>,
     request_id: [u8; 16],
     timestamp: u64,
+) -> Result<FastPathExecution, ProtoError> {
+    execute_operation_with_platform(audit_chain, op_id, args, request_id, timestamp, None)
+}
+
+/// Executes a typed operation on the fast path with an optional platform adapter.
+pub fn execute_operation_with_platform(
+    audit_chain: &mut AuditChain,
+    op_id: &str,
+    args: &BTreeMap<String, Value>,
+    request_id: [u8; 16],
+    timestamp: u64,
+    platform: Option<&dyn Platform>,
 ) -> Result<FastPathExecution, ProtoError> {
     // 1. Validate against typed command registry (Invariant 2: Default deny)
     let operation = match parse_operation(op_id, args) {
@@ -213,12 +244,38 @@ pub fn execute_operation_direct(
     // 3. Execute typed operation and generate terse result (Architecture §6: Act-first, report-after)
     let (terse_output, result_map, audit_details) = match operation {
         Operation::SystemStatusRead(_) => {
+            let status = if let Some(plat) = platform {
+                plat.basic_status().unwrap_or(SystemBasicStatus {
+                    is_unprivileged: true,
+                    is_locked: false,
+                    os_family: "windows".to_string(),
+                    hostname: "localhost".to_string(),
+                    uptime_seconds: 0,
+                })
+            } else {
+                SystemBasicStatus {
+                    is_unprivileged: true,
+                    is_locked: false,
+                    os_family: "windows".to_string(),
+                    hostname: "localhost".to_string(),
+                    uptime_seconds: 0,
+                }
+            };
+
             let mut res = BTreeMap::new();
             res.insert("status".to_string(), Value::Text("ok".to_string()));
-            res.insert("unprivileged".to_string(), Value::Bool(true));
+            res.insert(
+                "unprivileged".to_string(),
+                Value::Bool(status.is_unprivileged),
+            );
+            res.insert("locked".to_string(), Value::Bool(status.is_locked));
 
             let mut details = BTreeMap::new();
             details.insert("status".to_string(), "ok".to_string());
+            details.insert(
+                "unprivileged".to_string(),
+                status.is_unprivileged.to_string(),
+            );
 
             (
                 "✓ System status: ok (unprivileged)".to_string(),
@@ -246,24 +303,81 @@ pub fn execute_operation_direct(
             )
         }
         Operation::ApplicationOpen(open_args) => {
-            let mut res = BTreeMap::new();
-            res.insert("status".to_string(), Value::Text("launched".to_string()));
-            res.insert("app_id".to_string(), Value::Text(open_args.app_id.clone()));
+            if let Some(plat) = platform {
+                match plat.launch_registered_app(&open_args.app_id, &[]) {
+                    Ok(launch_res) => {
+                        let mut res = BTreeMap::new();
+                        res.insert("status".to_string(), Value::Text("launched".to_string()));
+                        res.insert("app_id".to_string(), Value::Text(open_args.app_id.clone()));
+                        res.insert("pid".to_string(), Value::Integer(launch_res.pid.into()));
 
-            let mut details = BTreeMap::new();
-            details.insert("app_id".to_string(), open_args.app_id.clone());
-            details.insert("status".to_string(), "launched".to_string());
+                        let mut details = BTreeMap::new();
+                        details.insert("app_id".to_string(), open_args.app_id.clone());
+                        details.insert("pid".to_string(), launch_res.pid.to_string());
+                        details.insert("status".to_string(), "launched".to_string());
 
-            let display_name = match open_args.app_id.as_str() {
-                "chrome" => "Chrome",
-                "firefox" => "Firefox",
-                "terminal" => "Terminal",
-                "calc" => "Calculator",
-                "notepad" => "Notepad",
-                other => other,
-            };
+                        let display_name = match open_args.app_id.as_str() {
+                            "chrome" => "Chrome",
+                            "firefox" => "Firefox",
+                            "terminal" => "Terminal",
+                            "calc" => "Calculator",
+                            "notepad" => "Notepad",
+                            other => other,
+                        };
 
-            (format!("✓ Opened {}", display_name), res, details)
+                        (format!("✓ Opened {}", display_name), res, details)
+                    }
+                    Err(e) => {
+                        let mut details = BTreeMap::new();
+                        details.insert("app_id".to_string(), open_args.app_id.clone());
+                        details.insert("decision".to_string(), "launch_failed".to_string());
+                        details.insert("error".to_string(), e.to_string());
+
+                        let _ = audit_chain.append(
+                            AuditEventType::ActionExecuted,
+                            "fast_path".to_string(),
+                            Some(op_id.to_string()),
+                            details,
+                            timestamp,
+                        );
+
+                        let response = Response {
+                            v: 1,
+                            request_id,
+                            status: ResponseStatus::Failed,
+                            result: None,
+                            error: Some(ErrorInfo {
+                                code: "LAUNCH_FAILED".to_string(),
+                                safe_message: format!("Platform launch failed: {}", e),
+                            }),
+                        };
+
+                        return Ok(FastPathExecution::Denied {
+                            reason: e.to_string(),
+                            response,
+                        });
+                    }
+                }
+            } else {
+                let mut res = BTreeMap::new();
+                res.insert("status".to_string(), Value::Text("launched".to_string()));
+                res.insert("app_id".to_string(), Value::Text(open_args.app_id.clone()));
+
+                let mut details = BTreeMap::new();
+                details.insert("app_id".to_string(), open_args.app_id.clone());
+                details.insert("status".to_string(), "launched".to_string());
+
+                let display_name = match open_args.app_id.as_str() {
+                    "chrome" => "Chrome",
+                    "firefox" => "Firefox",
+                    "terminal" => "Terminal",
+                    "calc" => "Calculator",
+                    "notepad" => "Notepad",
+                    other => other,
+                };
+
+                (format!("✓ Opened {}", display_name), res, details)
+            }
         }
         Operation::TaskStatusRead(task_args) => {
             let hex_id = hex_encode(task_args.task_id);

@@ -131,3 +131,72 @@ fn test_fast_path_unknown_op_fails_closed_and_audited() {
         other => panic!("Expected FastPathExecution::Denied, got {:?}", other),
     }
 }
+
+#[test]
+fn test_fast_path_with_platform_adapter_launches_app() {
+    use dumer_platform::{LaunchResult, MockPlatform};
+    use dumerd::fast_path::dispatch_fast_path_with_platform;
+
+    let mut audit_chain = AuditChain::new(None).expect("in-memory audit chain");
+    let matcher = CommandMatcher::new();
+    let mock = MockPlatform::new();
+    mock.register_mock_app(
+        "chrome",
+        LaunchResult {
+            pid: 7777,
+            app_id: "chrome".to_string(),
+        },
+    );
+
+    let result = dispatch_fast_path_with_platform(
+        &matcher,
+        &mut audit_chain,
+        "open chrome",
+        1004,
+        Some(&mock),
+    )
+    .expect("dispatch fast path with platform");
+
+    match result {
+        FastPathExecution::Completed {
+            response,
+            terse_output,
+        } => {
+            assert_eq!(response.status, ResponseStatus::Completed);
+            assert_eq!(terse_output, "✓ Opened Chrome");
+            assert_eq!(
+                audit_chain.events().last().unwrap().details.get("pid"),
+                Some(&"7777".to_string())
+            );
+        }
+        other => panic!("Expected FastPathExecution::Completed, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_fast_path_with_platform_adapter_session_locked_denied() {
+    use dumer_platform::{LockState, MockPlatform};
+    use dumerd::fast_path::dispatch_fast_path_with_platform;
+
+    let mut audit_chain = AuditChain::new(None).expect("in-memory audit chain");
+    let matcher = CommandMatcher::new();
+    let mock = MockPlatform::new();
+    mock.set_lock_state(LockState::Locked);
+
+    let result = dispatch_fast_path_with_platform(
+        &matcher,
+        &mut audit_chain,
+        "open chrome",
+        1005,
+        Some(&mock),
+    )
+    .expect("dispatch fast path with locked platform");
+
+    match result {
+        FastPathExecution::Denied { reason, response } => {
+            assert_eq!(response.status, ResponseStatus::Failed);
+            assert!(reason.contains("Workstation session is locked"));
+        }
+        other => panic!("Expected FastPathExecution::Denied, got {:?}", other),
+    }
+}
